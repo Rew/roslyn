@@ -25,9 +25,7 @@ namespace Microsoft.CodeAnalysis.Editor.Implementation.IntelliSense.Completion
                 return;
             }
 
-            // We are computing a model.  Commit it if we compute any selected item.
-            bool sendThrough, committed;
-            CommitOnEnter(out sendThrough, out committed);
+            CommitOnEnter(out var sendThrough, out var committed);
 
             // We did not commit based on enter.  So our computation will still be running.  Stop it now.
             if (!committed)
@@ -76,7 +74,7 @@ namespace Microsoft.CodeAnalysis.Editor.Implementation.IntelliSense.Completion
             }
 
             // If the selected item is the builder, dismiss
-            if (model.SelectedItem.IsSuggestionModeItem)
+            if (model.SelectedItem == model.SuggestionModeItem)
             {
                 sendThrough = false;
                 committed = false;
@@ -86,13 +84,13 @@ namespace Microsoft.CodeAnalysis.Editor.Implementation.IntelliSense.Completion
             if (sendThrough)
             {
                 // Get the text that the user has currently entered into the buffer
-                var viewSpan = model.GetViewBufferSpan(model.SelectedItem.Item.Span);
+                var viewSpan = model.GetViewBufferSpan(model.SelectedItem.Span);
                 var textTypedSoFar = model.GetCurrentTextInSnapshot(
                     viewSpan, this.TextView.TextSnapshot, this.GetCaretPointInViewBuffer());
 
                 var service = GetCompletionService();
                 sendThrough = SendEnterThroughToEditor(
-                     service.GetRules(), model.SelectedItem.Item, textTypedSoFar);
+                     service.GetRules(), model.SelectedItem, textTypedSoFar);
             }
 
             this.CommitOnNonTypeChar(model.SelectedItem, model);

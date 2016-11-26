@@ -23,28 +23,29 @@ namespace Microsoft.CodeAnalysis.CSharp.Syntax.InternalSyntax
                 case SyntaxKind.SemicolonToken:
                 case SyntaxKind.CommaToken:
                     // HACK: for error recovery, we prefer a (missing) type.
-                    return this.ParseTypeCore(parentIsParameter: false, isOrAs: true, expectSizes: false, isArrayCreation: false);
+                    return this.ParseType(ParseTypeMode.Pattern);
                 default:
                     // attempt to disambiguate.
                     break;
             }
 
-            // If it is a nameof, skip the 'if' and parse as a constant pattern.
+            // If it starts with 'nameof(', skip the 'if' and parse as a constant pattern.
             if (SyntaxFacts.IsPredefinedType(tk) ||
-                (tk == SyntaxKind.IdentifierToken && this.CurrentToken.ContextualKind != SyntaxKind.NameOfKeyword))
+                (tk == SyntaxKind.IdentifierToken &&
+                  (this.CurrentToken.ContextualKind != SyntaxKind.NameOfKeyword || this.PeekToken(1).Kind != SyntaxKind.OpenParenToken)))
             {
                 var resetPoint = this.GetResetPoint();
                 try
                 {
-                    TypeSyntax type = this.ParseTypeCore(parentIsParameter: false, isOrAs: true, expectSizes: false, isArrayCreation: false);
+                    TypeSyntax type = this.ParseType(ParseTypeMode.Pattern);
 
                     tk = this.CurrentToken.ContextualKind;
                     if (!type.IsMissing)
                     {
                         if (this.IsTrueIdentifier())
                         {
-                            var identifier = ParseIdentifierToken();
-                            node = _syntaxFactory.DeclarationPattern(type, identifier);
+                            var designation = ParseSimpleDesignation();
+                            node = _syntaxFactory.DeclarationPattern(type, designation);
                         }
                     }
 
@@ -82,6 +83,7 @@ namespace Microsoft.CodeAnalysis.CSharp.Syntax.InternalSyntax
                 // But it still might be a pattern such as (operand is 3) or (operand is nameof(x))
                 node = _syntaxFactory.ConstantPattern(this.ParseExpressionCore());
             }
+
             return node;
         }
 
@@ -115,14 +117,14 @@ namespace Microsoft.CodeAnalysis.CSharp.Syntax.InternalSyntax
                 var resetPoint = this.GetResetPoint();
                 try
                 {
-                    TypeSyntax type = this.ParseTypeCore(parentIsParameter: false, isOrAs: true, expectSizes: false, isArrayCreation: false);
+                    TypeSyntax type = this.ParseType(ParseTypeMode.Pattern);
                     if (!type.IsMissing)
                     {
                         // X.Y.Z id
                         if (this.IsTrueIdentifier() && (!whenIsKeyword || this.CurrentToken.ContextualKind != SyntaxKind.WhenKeyword))
                         {
-                            var identifier = ParseIdentifierToken();
-                            node = _syntaxFactory.DeclarationPattern(type, identifier);
+                            var designation = ParseSimpleDesignation();
+                            node = _syntaxFactory.DeclarationPattern(type, designation);
                         }
                     }
                     if (node == null)

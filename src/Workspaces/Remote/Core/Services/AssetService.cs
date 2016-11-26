@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis.Execution;
 using Microsoft.CodeAnalysis.Internal.Log;
+using Microsoft.CodeAnalysis.Serialization;
 using Roslyn.Utilities;
 
 namespace Microsoft.CodeAnalysis.Remote
@@ -19,54 +20,16 @@ namespace Microsoft.CodeAnalysis.Remote
     /// </summary>
     internal class AssetService
     {
-        private const int CleanupInterval = 3; // 3 minutes
-        private const int PurgeAfter = 30; // 30 minutes
-
-        private static readonly TimeSpan s_purgeAfterTimeSpan = TimeSpan.FromMinutes(PurgeAfter);
-        private static readonly TimeSpan s_cleanupIntervalTimeSpan = TimeSpan.FromMinutes(CleanupInterval);
-
         // PREVIEW: unfortunately, I need dummy workspace since workspace services can be workspace specific
         private static readonly Serializer s_serializer = new Serializer(new AdhocWorkspace(RoslynServices.HostServices, workspaceKind: "dummy").Services);
 
-        private readonly ConcurrentDictionary<int, AssetSource> _assetSources =
-            new ConcurrentDictionary<int, AssetSource>(concurrencyLevel: 4, capacity: 10);
+        private readonly int _sessionId;
+        private readonly AssetStorage _assetStorage;
 
-        private readonly ConcurrentDictionary<Checksum, Entry> _assets =
-            new ConcurrentDictionary<Checksum, Entry>(concurrencyLevel: 4, capacity: 10);
-
-        public AssetService()
+        public AssetService(int sessionId, AssetStorage assetStorage)
         {
-            Task.Run(CleanAssetsAsync, CancellationToken.None);
-        }
-
-        private async Task CleanAssetsAsync()
-        {
-            while (true)
-            {
-                CleanAssets();
-
-                await Task.Delay(s_cleanupIntervalTimeSpan).ConfigureAwait(false);
-            }
-        }
-
-        private void CleanAssets()
-        {
-            var current = DateTime.UtcNow;
-
-            using (Logger.LogBlock(FunctionId.AssetService_CleanAssets, CancellationToken.None))
-            {
-                foreach (var kvp in _assets.ToArray())
-                {
-                    if (current - kvp.Value.LastAccessed <= s_purgeAfterTimeSpan)
-                    {
-                        continue;
-                    }
-
-                    // If it fails, we'll just leave it in the asset pool.
-                    Entry entry;
-                    _assets.TryRemove(kvp.Key, out entry);
-                }
-            }
+            _sessionId = sessionId;
+            _assetStorage = assetStorage;
         }
 
         public T Deserialize<T>(string kind, ObjectReader reader, CancellationToken cancellationToken)
@@ -74,21 +37,10 @@ namespace Microsoft.CodeAnalysis.Remote
             return s_serializer.Deserialize<T>(kind, reader, cancellationToken);
         }
 
-        public void RegisterAssetSource(int serviceId, AssetSource assetSource)
-        {
-            Contract.ThrowIfFalse(_assetSources.TryAdd(serviceId, assetSource));
-        }
-
-        public void UnregisterAssetSource(int serviceId)
-        {
-            AssetSource dummy;
-            _assetSources.TryRemove(serviceId, out dummy);
-        }
-
         public async Task<T> GetAssetAsync<T>(Checksum checksum, CancellationToken cancellationToken)
         {
             T asset;
-            if (TryGetAsset(checksum, out asset))
+            if (_assetStorage.TryGetAsset(checksum, out asset))
             {
                 return asset;
             }
@@ -98,10 +50,33 @@ namespace Microsoft.CodeAnalysis.Remote
                 // TODO: what happen if service doesn't come back. timeout?
                 var value = await RequestAssetAsync(checksum, cancellationToken).ConfigureAwait(false);
 
-                _assets.TryAdd(checksum, new Entry(value));
-
+                _assetStorage.TryAddAsset(checksum, value);
                 return (T)value;
             }
+        }
+
+        public async Task<List<ValueTuple<Checksum, T>>> GetAssetsAsync<T>(IEnumerable<Checksum> checksums, CancellationToken cancellationToken)
+        {
+            // this only works when caller wants to get same kind of assets at once
+
+            // bulk synchronize checksums first
+            await SynchronizeAssetsAsync(checksums, cancellationToken).ConfigureAwait(false);
+
+            var list = new List<ValueTuple<Checksum, T>>();
+            foreach (var checksum in checksums)
+            {
+                list.Add(ValueTuple.Create(checksum, await GetAssetAsync<T>(checksum, cancellationToken).ConfigureAwait(false)));
+            }
+
+            return list;
+        }
+
+        public async Task SynchronizeAssetsAsync(IEnumerable<Checksum> checksums, CancellationToken cancellationToken)
+        {
+            // if caller wants to get different kind of assets at once, he needs to first sync asserts and use
+            // GetAssetAsync to get those.
+            var syncer = new ChecksumSynchronizer(this);
+            await syncer.SynchronizeAssetsAsync(checksums, cancellationToken).ConfigureAwait(false);
         }
 
         public async Task SynchronizeSolutionAssetsAsync(Checksum solutionChecksum, CancellationToken cancellationToken)
@@ -116,8 +91,8 @@ namespace Microsoft.CodeAnalysis.Remote
             // before one actually consume the data. 
             using (Logger.LogBlock(FunctionId.AssetService_SynchronizeSolutionAssetsAsync, Checksum.GetChecksumLogInfo, solutionChecksum, cancellationToken))
             {
-                var collector = new ChecksumSynchronizer(this);
-                await collector.SynchronizeAsync(solutionChecksum, cancellationToken).ConfigureAwait(false);
+                var syncer = new ChecksumSynchronizer(this);
+                await syncer.SynchronizeSolutionAssetsAsync(solutionChecksum, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -129,26 +104,7 @@ namespace Microsoft.CodeAnalysis.Remote
             // even if it got expired after this for whatever reason, functionality wise everything will still work, 
             // just perf will be impacted since we will fetch it from data source (VS)
             object unused;
-            return TryGetAsset(checksum, out unused);
-        }
-
-        private bool TryGetAsset<T>(Checksum checksum, out T value)
-        {
-            value = default(T);
-            using (Logger.LogBlock(FunctionId.AssetService_TryGetAsset, Checksum.GetChecksumLogInfo, checksum, CancellationToken.None))
-            {
-                Entry entry;
-                if (!_assets.TryGetValue(checksum, out entry))
-                {
-                    return false;
-                }
-
-                // Update timestamp
-                Update(checksum, entry);
-
-                value = (T)entry.Object;
-                return true;
-            }
+            return _assetStorage.TryGetAsset(checksum, out unused);
         }
 
         private async Task SynchronizeAssetsAsync(ISet<Checksum> checksums, CancellationToken cancellationToken)
@@ -159,16 +115,9 @@ namespace Microsoft.CodeAnalysis.Remote
 
                 foreach (var tuple in values)
                 {
-                    _assets.TryAdd(tuple.Item1, new Entry(tuple.Item2));
+                    _assetStorage.TryAddAsset(tuple.Item1, tuple.Item2);
                 }
             }
-        }
-
-        private void Update(Checksum checksum, Entry entry)
-        {
-            // entry is reference type. we update it directly. 
-            // we don't care about race.
-            entry.LastAccessed = DateTime.UtcNow;
         }
 
         private async Task<object> RequestAssetAsync(Checksum checksum, CancellationToken cancellationToken)
@@ -189,61 +138,33 @@ namespace Microsoft.CodeAnalysis.Remote
                 return SpecializedCollections.EmptyList<ValueTuple<Checksum, object>>();
             }
 
-            // the service doesn't care which asset source it uses to get the asset. if there are multiple
-            // channel created (multiple caller to code analysis service), we will have multiple asset sources
-            // 
-            // but, there must be one that knows about the asset with the checksum that is pinned for this
-            //      particular call
-            foreach (var kv in _assetSources.ToArray())
+            var source = _assetStorage.TryGetAssetSource(_sessionId);
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (source == null)
             {
-                var serviceId = kv.Key;
-                var source = kv.Value;
-
-                cancellationToken.ThrowIfCancellationRequested();
-
-                try
-                {
-                    // ask one of asset source for data
-                    return await source.RequestAssetsAsync(serviceId, checksums, cancellationToken).ConfigureAwait(false);
-                }
-                catch (Exception ex) when (IsExpected(ex))
-                {
-                    // cancellation could be from either caller or asset side when cancelled. we only throw cancellation if
-                    // caller side is cancelled. otherwise, we move to next asset source
-                    cancellationToken.ThrowIfCancellationRequested();
-
-                    // connection to the asset source has closed.
-                    // move to next asset source
-                    continue;
-                }
+                return SpecializedCollections.EmptyList<ValueTuple<Checksum, object>>();
             }
 
-            throw ExceptionUtilities.Unreachable;
-        }
-
-        private bool IsExpected(Exception ex)
-        {
-            // these exception can happen if either operation is cancelled, connection to asset source is closed
-            return ex is OperationCanceledException || ex is IOException || ex is ObjectDisposedException;
-        }
-
-        private class Entry
-        {
-            // mutable field
-            public DateTime LastAccessed;
-
-            // this can't change for same checksum
-            public readonly object Object;
-
-            public Entry(object @object)
+            try
             {
-                LastAccessed = DateTime.UtcNow;
-                Object = @object;
+                // ask one of asset source for data
+                return await source.RequestAssetsAsync(_sessionId, checksums, cancellationToken).ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                // object disposed exception can happen if StreamJsonRpc get disconnected
+                // in the middle of read/write due to cancellation
+                cancellationToken.ThrowIfCancellationRequested();
+                throw;
             }
         }
 
         private struct ChecksumSynchronizer
         {
+            // make sure there is always only 1 bulk synchronization
+            private static readonly SemaphoreSlim s_gate = new SemaphoreSlim(initialCount: 1);
+
             private readonly AssetService _assetService;
 
             public ChecksumSynchronizer(AssetService assetService)
@@ -251,72 +172,94 @@ namespace Microsoft.CodeAnalysis.Remote
                 _assetService = assetService;
             }
 
-            public async Task SynchronizeAsync(Checksum solutionChecksum, CancellationToken cancellationToken)
+            public async Task SynchronizeAssetsAsync(IEnumerable<Checksum> checksums, CancellationToken cancellationToken)
             {
-                // this will make 4 round trip to data source (VS) to get all assets that belong to the given solution checksum
-
-                // first, get solution checksum object for the given solution checksum
-                var solutionChecksumObject = await _assetService.GetAssetAsync<SolutionChecksumObject>(solutionChecksum, cancellationToken).ConfigureAwait(false);
-
-                // second, get direct children of the solution
-                await SynchronizeSolutionAsync(solutionChecksumObject, cancellationToken).ConfigureAwait(false);
-
-                // third, get direct children for all projects in the solution
-                await SynchronizeProjectsAsync(solutionChecksumObject, cancellationToken).ConfigureAwait(false);
-
-                // last, get direct children for all documents in the solution
-                await SynchronizeDocumentsAsync(solutionChecksumObject, cancellationToken).ConfigureAwait(false);
+                using (await s_gate.DisposableWaitAsync(cancellationToken).ConfigureAwait(false))
+                using (var pooledObject = SharedPools.Default<HashSet<Checksum>>().GetPooledObject())
+                {
+                    AddIfNeeded(pooledObject.Object, checksums);
+                    await _assetService.SynchronizeAssetsAsync(pooledObject.Object, cancellationToken).ConfigureAwait(false);
+                }
             }
 
-            private async Task SynchronizeSolutionAsync(SolutionChecksumObject solutionChecksumObject, CancellationToken cancellationToken)
+            public async Task SynchronizeSolutionAssetsAsync(Checksum solutionChecksum, CancellationToken cancellationToken)
+            {
+                using (await s_gate.DisposableWaitAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    // this will make 4 round trip to data source (VS) to get all assets that belong to the given solution checksum
+
+                    // first, get solution checksum object for the given solution checksum
+                    var solutionChecksumObject = await _assetService.GetAssetAsync<SolutionStateChecksums>(solutionChecksum, cancellationToken).ConfigureAwait(false);
+
+                    // second, get direct children of the solution
+                    await SynchronizeSolutionAsync(solutionChecksumObject, cancellationToken).ConfigureAwait(false);
+
+                    // third, get direct children for all projects in the solution
+                    await SynchronizeProjectsAsync(solutionChecksumObject, cancellationToken).ConfigureAwait(false);
+
+                    // last, get direct children for all documents in the solution
+                    await SynchronizeDocumentsAsync(solutionChecksumObject, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            private async Task SynchronizeSolutionAsync(SolutionStateChecksums solutionChecksumObject, CancellationToken cancellationToken)
             {
                 // get children of solution checksum object at once
-                var solutionChecksums = new HashSet<Checksum>();
+                using (var pooledObject = SharedPools.Default<HashSet<Checksum>>().GetPooledObject())
+                {
+                    var solutionChecksums = pooledObject.Object;
 
-                AddIfNeeded(solutionChecksums, solutionChecksumObject.Children);
-                await _assetService.SynchronizeAssetsAsync(solutionChecksums, cancellationToken).ConfigureAwait(false);
+                    AddIfNeeded(solutionChecksums, solutionChecksumObject.Children);
+                    await _assetService.SynchronizeAssetsAsync(solutionChecksums, cancellationToken).ConfigureAwait(false);
+                }
             }
 
-            private async Task SynchronizeProjectsAsync(SolutionChecksumObject solutionChecksumObject, CancellationToken cancellationToken)
+            private async Task SynchronizeProjectsAsync(SolutionStateChecksums solutionChecksumObject, CancellationToken cancellationToken)
             {
                 // get children of project checksum objects at once
-                var projectChecksums = new HashSet<Checksum>();
-
-                foreach (var projectChecksum in solutionChecksumObject.Projects)
+                using (var pooledObject = SharedPools.Default<HashSet<Checksum>>().GetPooledObject())
                 {
-                    var projectChecksumObject = await _assetService.GetAssetAsync<ProjectChecksumObject>(projectChecksum, cancellationToken).ConfigureAwait(false);
-                    AddIfNeeded(projectChecksums, projectChecksumObject.Children);
-                }
+                    var projectChecksums = pooledObject.Object;
 
-                await _assetService.SynchronizeAssetsAsync(projectChecksums, cancellationToken).ConfigureAwait(false);
+                    foreach (var projectChecksum in solutionChecksumObject.Projects)
+                    {
+                        var projectChecksumObject = await _assetService.GetAssetAsync<ProjectStateChecksums>(projectChecksum, cancellationToken).ConfigureAwait(false);
+                        AddIfNeeded(projectChecksums, projectChecksumObject.Children);
+                    }
+
+                    await _assetService.SynchronizeAssetsAsync(projectChecksums, cancellationToken).ConfigureAwait(false);
+                }
             }
 
-            private async Task SynchronizeDocumentsAsync(SolutionChecksumObject solutionChecksumObject, CancellationToken cancellationToken)
+            private async Task SynchronizeDocumentsAsync(SolutionStateChecksums solutionChecksumObject, CancellationToken cancellationToken)
             {
                 // get children of document checksum objects at once
-                var documentChecksums = new HashSet<Checksum>();
-
-                foreach (var projectChecksum in solutionChecksumObject.Projects)
+                using (var pooledObject = SharedPools.Default<HashSet<Checksum>>().GetPooledObject())
                 {
-                    var projectChecksumObject = await _assetService.GetAssetAsync<ProjectChecksumObject>(projectChecksum, cancellationToken).ConfigureAwait(false);
+                    var documentChecksums = pooledObject.Object;
 
-                    foreach (var checksum in projectChecksumObject.Documents)
+                    foreach (var projectChecksum in solutionChecksumObject.Projects)
                     {
-                        var documentChecksumObject = await _assetService.GetAssetAsync<DocumentChecksumObject>(checksum, cancellationToken).ConfigureAwait(false);
-                        AddIfNeeded(documentChecksums, documentChecksumObject.Children);
+                        var projectChecksumObject = await _assetService.GetAssetAsync<ProjectStateChecksums>(projectChecksum, cancellationToken).ConfigureAwait(false);
+
+                        foreach (var checksum in projectChecksumObject.Documents)
+                        {
+                            var documentChecksumObject = await _assetService.GetAssetAsync<DocumentStateChecksums>(checksum, cancellationToken).ConfigureAwait(false);
+                            AddIfNeeded(documentChecksums, documentChecksumObject.Children);
+                        }
+
+                        foreach (var checksum in projectChecksumObject.AdditionalDocuments)
+                        {
+                            var documentChecksumObject = await _assetService.GetAssetAsync<DocumentStateChecksums>(checksum, cancellationToken).ConfigureAwait(false);
+                            AddIfNeeded(documentChecksums, documentChecksumObject.Children);
+                        }
                     }
 
-                    foreach (var checksum in projectChecksumObject.AdditionalDocuments)
-                    {
-                        var documentChecksumObject = await _assetService.GetAssetAsync<DocumentChecksumObject>(checksum, cancellationToken).ConfigureAwait(false);
-                        AddIfNeeded(documentChecksums, documentChecksumObject.Children);
-                    }
+                    await _assetService.SynchronizeAssetsAsync(documentChecksums, cancellationToken).ConfigureAwait(false);
                 }
-
-                await _assetService.SynchronizeAssetsAsync(documentChecksums, cancellationToken).ConfigureAwait(false);
             }
 
-            private void AddIfNeeded(HashSet<Checksum> checksums, object[] checksumOrCollections)
+            private void AddIfNeeded(HashSet<Checksum> checksums, IReadOnlyList<object> checksumOrCollections)
             {
                 foreach (var checksumOrCollection in checksumOrCollections)
                 {
@@ -356,4 +299,3 @@ namespace Microsoft.CodeAnalysis.Remote
         }
     }
 }
-

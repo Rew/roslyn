@@ -13,7 +13,7 @@ namespace Microsoft.CodeAnalysis.FindSymbols
     {
         private async Task ProcessProjectsAsync(
             IEnumerable<ProjectId> projectSet,
-            Dictionary<Project, Dictionary<Document, List<ValueTuple<ISymbol, IReferenceFinder>>>> projectMap,
+            Dictionary<Project, Dictionary<Document, List<(SymbolAndProjectId symbolAndProjectId, IReferenceFinder finder)>>> projectMap,
             ProgressWrapper wrapper)
         {
             var visitedProjects = new HashSet<ProjectId>();
@@ -31,14 +31,14 @@ namespace Microsoft.CodeAnalysis.FindSymbols
                 }
                 finally
                 {
-                    _progressTracker.ItemCompleted();
+                    await _progressTracker.ItemCompletedAsync().ConfigureAwait(false);
                 }
             }
         }
 
         private async Task ProcessProjectAsync(
             ProjectId projectId,
-            Dictionary<Project, Dictionary<Document, List<ValueTuple<ISymbol, IReferenceFinder>>>> projectMap,
+            Dictionary<Project, Dictionary<Document, List<(SymbolAndProjectId symbolAndProjectId, IReferenceFinder finder)>>> projectMap,
             HashSet<ProjectId> visitedProjects,
             ProgressWrapper wrapper)
         {
@@ -62,11 +62,10 @@ namespace Microsoft.CodeAnalysis.FindSymbols
 
         private async Task ProcessProjectAsync(
             Project project,
-            Dictionary<Project, Dictionary<Document, List<ValueTuple<ISymbol, IReferenceFinder>>>> projectMap,
+            Dictionary<Project, Dictionary<Document, List<(SymbolAndProjectId symbolAndProjectId, IReferenceFinder finder)>>> projectMap,
             ProgressWrapper wrapper)
         {
-            Dictionary<Document, List<ValueTuple<ISymbol, IReferenceFinder>>> map;
-            if (!projectMap.TryGetValue(project, out map))
+            if (!projectMap.TryGetValue(project, out var map))
             {
                 // No files in this project to process.  We can bail here.  We'll have cached our
                 // compilation if there are any projects left to process that depend on us.
@@ -82,7 +81,7 @@ namespace Microsoft.CodeAnalysis.FindSymbols
 
         private async Task ProcessProjectAsync(
             Project project,
-            Dictionary<Document, List<ValueTuple<ISymbol, IReferenceFinder>>> map,
+            Dictionary<Document, List<(SymbolAndProjectId symbolAndProjectId, IReferenceFinder finder)>> map,
             ProgressWrapper wrapper)
         {
             using (Logger.LogBlock(FunctionId.FindReference_ProcessProjectAsync, project.Name, _cancellationToken))
@@ -96,7 +95,7 @@ namespace Microsoft.CodeAnalysis.FindSymbols
                     var document = kvp.Key;
                     var documentQueue = kvp.Value;
 
-                    documentTasks.Add(Task.Run(async () => await ProcessDocumentQueueAsync(document, documentQueue, wrapper).ConfigureAwait(false), _cancellationToken));
+                    documentTasks.Add(Task.Run(() => ProcessDocumentQueueAsync(document, documentQueue, wrapper), _cancellationToken));
                 }
 
                 await Task.WhenAll(documentTasks).ConfigureAwait(false);

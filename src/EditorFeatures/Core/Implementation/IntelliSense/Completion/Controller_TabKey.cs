@@ -8,6 +8,7 @@ using Microsoft.CodeAnalysis.Editor.Shared.Extensions;
 using Microsoft.CodeAnalysis.LanguageServices;
 using Microsoft.CodeAnalysis.Shared.Extensions;
 using Microsoft.CodeAnalysis.Text;
+using Roslyn.Utilities;
 
 namespace Microsoft.CodeAnalysis.Editor.Implementation.IntelliSense.Completion
 {
@@ -26,10 +27,7 @@ namespace Microsoft.CodeAnalysis.Editor.Implementation.IntelliSense.Completion
             if (sessionOpt == null)
             {
                 // The user may be trying to invoke snippets through question-tab
-                var completionService = GetCompletionService();
-
-                if (completionService != null &&
-                    TryInvokeSnippetCompletion(args, completionService))
+                if (TryInvokeSnippetCompletion(args))
                 {
                     // We've taken care of the tab. Don't send it to the buffer.
                     return;
@@ -39,14 +37,11 @@ namespace Microsoft.CodeAnalysis.Editor.Implementation.IntelliSense.Completion
                 nextHandler();
                 return;
             }
-
             // We are computing a model.  Try to commit the selected item if there was one. Note: If
             // it was able to commit, then we never send the tab to the buffer. That way, if the
             // user does an undo they'll get to the code they had *before* they hit tab. If the
             // session wasn't able to commit, then we do send the tab through to the buffer.
-
-            bool committed;
-            CommitOnTab(out committed);
+            CommitOnTab(out var committed);
 
             // We did not commit based on tab.  So our computation will still be running.  Stop it now.
             // Also, send the tab through to the editor.
@@ -57,13 +52,12 @@ namespace Microsoft.CodeAnalysis.Editor.Implementation.IntelliSense.Completion
             }
         }
 
-        private bool TryInvokeSnippetCompletion(TabKeyCommandArgs args, CompletionService completionService)
+        private bool TryInvokeSnippetCompletion(TabKeyCommandArgs args)
         {
             var subjectBuffer = args.SubjectBuffer;
             var caretPoint = args.TextView.GetCaretPoint(subjectBuffer).Value.Position;
 
             var text = subjectBuffer.AsTextContainer().CurrentText;
-
             // If the user types "<line start><spaces><question><tab>"
             // then the editor takes over and shows the normal *full* snippet picker UI.
             // i.e. the picker with all the folders and snippet organization.
@@ -80,9 +74,8 @@ namespace Microsoft.CodeAnalysis.Editor.Implementation.IntelliSense.Completion
             // question mark) and we don't send the tab through to the editor.  In 
             // essence, the <quesiton><tab> acts as the trigger, and we act as if that
             // text never makes it into the buffer.
-            Workspace workspace = null;
 
-            if (!Workspace.TryGetWorkspace(subjectBuffer.AsTextContainer(), out workspace))
+            if (!Workspace.TryGetWorkspace(subjectBuffer.AsTextContainer(), out var workspace))
             {
                 return false;
             }
@@ -99,7 +92,12 @@ namespace Microsoft.CodeAnalysis.Editor.Implementation.IntelliSense.Completion
                 return false;
             }
 
-            var rules = GetCompletionService().GetRules();
+            // There's was a buffer-Document mapping. We should be able
+            // to get a CompletionService.
+            var completionService = GetCompletionService();
+            Contract.ThrowIfNull(completionService, nameof(completionService));
+
+            var rules = completionService.GetRules();
             if (rules.SnippetsRule != SnippetsRule.IncludeAfterTypingIdentifierQuestionTab)
             {
                 return false;
@@ -167,7 +165,7 @@ namespace Microsoft.CodeAnalysis.Editor.Implementation.IntelliSense.Completion
             }
 
             // If the selected item is the builder, there's not actually any work to do to commit
-            if (model.SelectedItem.IsSuggestionModeItem)
+            if (model.SelectedItem == model.SuggestionModeItem)
             {
                 committed = true;
                 this.StopModelComputation();

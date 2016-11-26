@@ -335,10 +335,8 @@ namespace Roslyn.Utilities
             }
 
             var elementKind = (DataKind)_reader.ReadByte();
-
             // optimization for primitive type array
-            Type elementType;
-            if (s_reverseTypeMap.TryGetValue(elementKind, out elementType))
+            if (s_reverseTypeMap.TryGetValue(elementKind, out var elementType))
             {
                 return this.ReadPrimitiveTypeArrayElements(elementType, elementKind, length);
             }
@@ -416,7 +414,7 @@ namespace Roslyn.Utilities
             if (length == 0)
             {
                 //  simple check
-                return SpecializedCollections.EmptyArray<bool>();
+                return Array.Empty<bool>();
             }
 
             var array = new bool[length];
@@ -446,7 +444,7 @@ namespace Roslyn.Utilities
             if (length == 0)
             {
                 // quick check
-                return SpecializedCollections.EmptyArray<T>();
+                return Array.Empty<T>();
             }
 
             var array = new T[length];

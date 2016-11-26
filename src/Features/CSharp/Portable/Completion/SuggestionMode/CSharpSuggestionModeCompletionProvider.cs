@@ -37,9 +37,6 @@ namespace Microsoft.CodeAnalysis.CSharp.Completion.SuggestionMode
 
                 var semanticModel = await document.GetSemanticModelForNodeAsync(token.Parent, cancellationToken).ConfigureAwait(false);
                 var typeInferrer = document.GetLanguageService<ITypeInferenceService>();
-
-                TypeDeclarationSyntax typeDeclaration;
-
                 if (IsLambdaExpression(semanticModel, position, token, typeInferrer, cancellationToken))
                 {
                     return CreateSuggestionModeItem(CSharpFeaturesResources.lambda_expression, CSharpFeaturesResources.Autoselect_disabled_due_to_potential_lambda_declaration);
@@ -47,10 +44,6 @@ namespace Microsoft.CodeAnalysis.CSharp.Completion.SuggestionMode
                 else if (IsAnonymousObjectCreation(token))
                 {
                     return CreateSuggestionModeItem(CSharpFeaturesResources.member_name, CSharpFeaturesResources.Autoselect_disabled_due_to_possible_explicitly_named_anonymous_type_member_creation);
-                }
-                else if (IsPossibleTupleExpression(token))
-                {
-                    return CreateSuggestionModeItem(CSharpFeaturesResources.element_name, CSharpFeaturesResources.Autoselect_disabled_due_to_possible_tuple_type_element_creation);
                 }
                 else if (token.IsPreProcessorExpressionContext())
                 {
@@ -68,7 +61,7 @@ namespace Microsoft.CodeAnalysis.CSharp.Completion.SuggestionMode
                 {
                     return CreateSuggestionModeItem(CSharpFeaturesResources.namespace_name, CSharpFeaturesResources.Autoselect_disabled_due_to_namespace_declaration);
                 }
-                else if (tree.IsPartialTypeDeclarationNameContext(position, cancellationToken, out typeDeclaration))
+                else if (tree.IsPartialTypeDeclarationNameContext(position, cancellationToken, out var typeDeclaration))
                 {
                     switch (typeDeclaration.Keyword.Kind())
                     {
@@ -81,6 +74,11 @@ namespace Microsoft.CodeAnalysis.CSharp.Completion.SuggestionMode
                         case SyntaxKind.InterfaceKeyword:
                             return CreateSuggestionModeItem(CSharpFeaturesResources.interface_name, CSharpFeaturesResources.Autoselect_disabled_due_to_type_declaration);
                     }
+                }
+                else if (tree.IsPossibleDeconstructionDesignation(position, cancellationToken))
+                {
+                    return CreateSuggestionModeItem(CSharpFeaturesResources.designation_name,
+                        CSharpFeaturesResources.Autoselect_disabled_due_to_possible_deconstruction_declaration);
                 }
             }
 
@@ -110,20 +108,6 @@ namespace Microsoft.CodeAnalysis.CSharp.Completion.SuggestionMode
             return false;
         }
 
-        private bool IsPossibleTupleExpression(SyntaxToken token)
-        {
-            // first element in an autocompleted tuple will look like a parenthesized expression (foo )
-            // so we need to conservatively treat parenthesized expression as apotential tuple
-            if (token.Parent.IsKind(SyntaxKind.TupleExpression, SyntaxKind.ParenthesizedExpression))
-            {
-                // We'll show the builder after an open paren or comma, because that's where the
-                // user can start declaring new named parts. 
-                return token.Kind() == SyntaxKind.OpenParenToken || token.Kind() == SyntaxKind.CommaToken;
-            }
-
-            return false;
-        }
-
         private bool IsLambdaExpression(SemanticModel semanticModel, int position, SyntaxToken token, ITypeInferenceService typeInferrer, CancellationToken cancellationToken)
         {
             // Typing a generic type parameter, the tree might look like a binary expression around the < token.
@@ -141,6 +125,15 @@ namespace Microsoft.CodeAnalysis.CSharp.Completion.SuggestionMode
                 {
                     return token.Parent.Parent != null && token.Parent.Parent is ParenthesizedLambdaExpressionSyntax;
                 }
+            }
+
+            // A lambda that is being typed may be parsed as a tuple without names
+            // For example, "(a, b" could be the start of either a tuple or lambda
+            // But "(a: b, c" cannot be a lambda
+            if (token.SyntaxTree.IsPossibleTupleContext(token, position) && token.Parent.IsKind(SyntaxKind.TupleExpression) &&
+               !((TupleExpressionSyntax)token.Parent).HasNames())
+            {
+                position = token.Parent.SpanStart;
             }
 
             // Walk up a single level to allow for typing the beginning of a lambda:

@@ -24,13 +24,15 @@ namespace Microsoft.CodeAnalysis.Editor.CSharp.UnitTests.Completion.CompletionPr
         [Fact, Trait(Traits.Feature, Traits.Features.Completion)]
         public async Task AfterFirstExplicitArgument()
         {
-            await VerifyNotBuilderAsync(AddInsideMethod(@"Func<int, int, int> f = (int x, i $$"));
+            // The right-hand-side parses like a possible deconstruction or tuple type
+            await VerifyBuilderAsync(AddInsideMethod(@"Func<int, int, int> f = (int x, i $$"));
         }
 
         [Fact, Trait(Traits.Feature, Traits.Features.Completion)]
         public async Task AfterFirstImplicitArgument()
         {
-            await VerifyNotBuilderAsync(AddInsideMethod(@"Func<int, int, int> f = (x, i $$"));
+            // The right-hand-side parses like a possible deconstruction or tuple type
+            await VerifyBuilderAsync(AddInsideMethod(@"Func<int, int, int> f = (x, i $$"));
         }
 
         [Fact, Trait(Traits.Feature, Traits.Features.Completion)]
@@ -46,7 +48,8 @@ namespace Microsoft.CodeAnalysis.Editor.CSharp.UnitTests.Completion.CompletionPr
     }
 }
 ";
-            await VerifyNotBuilderAsync(markup);
+            // The right-hand-side parses like a possible deconstruction or tuple type
+            await VerifyBuilderAsync(markup);
         }
 
         [Fact, Trait(Traits.Feature, Traits.Features.Completion)]
@@ -62,7 +65,8 @@ namespace Microsoft.CodeAnalysis.Editor.CSharp.UnitTests.Completion.CompletionPr
     }
 }
 ";
-            await VerifyNotBuilderAsync(markup);
+            // Could be a deconstruction expression
+            await VerifyBuilderAsync(markup);
         }
 
         [Fact, Trait(Traits.Feature, Traits.Features.Completion)]
@@ -391,11 +395,11 @@ class Program
         Console.CancelKeyPress += new ConsoleCancelEventHandler(((a$$
     }
 }";
-            await VerifyBuilderAsync(markup);
+            await VerifyNotBuilderAsync(markup);
         }
 
         [Fact, Trait(Traits.Feature, Traits.Features.Completion)]
-        public async Task ParenthesizedExpression()
+        public async Task ParenthesizedExpressionInVarDeclaration()
         {
             var markup = @"using System;
 class Program
@@ -405,11 +409,11 @@ class Program
         var x = (a$$
     }
 }";
-            await VerifyBuilderAsync(markup);
+            await VerifyNotBuilderAsync(markup);
         }
 
         [Fact, Trait(Traits.Feature, Traits.Features.Completion)]
-        public async Task TupleExpressionAfterParen()
+        public async Task TupleExpressionInVarDeclaration()
         {
             var markup = @"using System;
 class Program
@@ -419,10 +423,11 @@ class Program
         var x = (a$$, b)
     }
 }";
-            await VerifyBuilderAsync(markup);
+            await VerifyNotBuilderAsync(markup);
         }
 
-        public async Task TupleExpressionAfterComma()
+        [Fact, Trait(Traits.Feature, Traits.Features.Completion)]
+        public async Task TupleExpressionInVarDeclaration2()
         {
             var markup = @"using System;
 class Program
@@ -432,9 +437,64 @@ class Program
         var x = (a, b$$)
     }
 }";
+            await VerifyNotBuilderAsync(markup);
+        }
+
+        [Fact, Trait(Traits.Feature, Traits.Features.Completion)]
+        public async Task IncompleteLambdaInActionDeclaration()
+        {
+            var markup = @"using System;
+class Program
+{
+    static void Main(string[] args)
+    {
+        System.Action x = (a$$, b)
+    }
+}";
             await VerifyBuilderAsync(markup);
         }
 
+        [Fact, Trait(Traits.Feature, Traits.Features.Completion)]
+        public async Task TupleWithNamesInActionDeclaration()
+        {
+            var markup = @"using System;
+class Program
+{
+    static void Main(string[] args)
+    {
+        System.Action x = (a$$, b: b)
+    }
+}";
+            await VerifyNotBuilderAsync(markup);
+        }
+
+        [Fact, Trait(Traits.Feature, Traits.Features.Completion)]
+        public async Task TupleWithNamesInActionDeclaration2()
+        {
+            var markup = @"using System;
+class Program
+{
+    static void Main(string[] args)
+    {
+        System.Action x = (a: a, b$$)
+    }
+}";
+            await VerifyNotBuilderAsync(markup);
+        }
+
+        [Fact, Trait(Traits.Feature, Traits.Features.Completion)]
+        public async Task TupleWithNamesInVarDeclaration()
+        {
+            var markup = @"using System;
+class Program
+{
+    static void Main(string[] args)
+    {
+        var x = (a: a, b$$)
+    }
+}";
+            await VerifyNotBuilderAsync(markup);
+        }
 
         [WorkItem(546363, "http://vstfdevdiv:8080/DevDiv2/DevDiv/_workitems/edit/546363")]
         [Fact, Trait(Traits.Feature, Traits.Features.Completion)]
@@ -670,9 +730,7 @@ class C {
 
         private async Task VerifyWorkerAsync(string markup, bool isBuilder)
         {
-            string code;
-            int position;
-            MarkupTestFile.GetPosition(markup, out code, out position);
+            MarkupTestFile.GetPosition(markup, out var code, out int position);
 
             using (var workspaceFixture = new CSharpTestWorkspaceFixture())
             {

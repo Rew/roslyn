@@ -13,10 +13,10 @@ namespace Microsoft.CodeAnalysis.FindSymbols
     {
         private async Task ProcessDocumentQueueAsync(
             Document document,
-            List<ValueTuple<ISymbol, IReferenceFinder>> documentQueue,
+            List<(SymbolAndProjectId symbolAndProjectId, IReferenceFinder finder)> documentQueue,
             ProgressWrapper wrapper)
         {
-            _progress.OnFindInDocumentStarted(document);
+            await _progress.OnFindInDocumentStartedAsync(document).ConfigureAwait(false);
 
             SemanticModel model = null;
             try
@@ -40,8 +40,8 @@ namespace Microsoft.CodeAnalysis.FindSymbols
 #else
                 foreach (var symbolAndFinder in documentQueue)
                 {
-                    var symbol = symbolAndFinder.Item1;
-                    var finder = symbolAndFinder.Item2;
+                    var symbol = symbolAndFinder.symbolAndProjectId;
+                    var finder = symbolAndFinder.finder;
 
                     await ProcessDocumentAsync(document, symbol, finder, wrapper).ConfigureAwait(false);
                 }
@@ -51,7 +51,7 @@ namespace Microsoft.CodeAnalysis.FindSymbols
             {
                 FindReferenceCache.Stop(model);
 
-                _progress.OnFindInDocumentCompleted(document);
+                await _progress.OnFindInDocumentCompletedAsync(document).ConfigureAwait(false);
             }
         }
 
@@ -62,23 +62,23 @@ namespace Microsoft.CodeAnalysis.FindSymbols
 
         private async Task ProcessDocumentAsync(
             Document document,
-            ISymbol symbol,
+            SymbolAndProjectId symbolAndProjectId,
             IReferenceFinder finder,
             ProgressWrapper wrapper)
         {
-            using (Logger.LogBlock(FunctionId.FindReference_ProcessDocumentAsync, s_logDocument, document, symbol, _cancellationToken))
+            using (Logger.LogBlock(FunctionId.FindReference_ProcessDocumentAsync, s_logDocument, document, symbolAndProjectId.Symbol, _cancellationToken))
             {
                 try
                 {
-                    var references = await finder.FindReferencesInDocumentAsync(symbol, document, _cancellationToken).ConfigureAwait(false) ?? SpecializedCollections.EmptyEnumerable<ReferenceLocation>();
+                    var references = await finder.FindReferencesInDocumentAsync(symbolAndProjectId, document, _cancellationToken).ConfigureAwait(false);
                     foreach (var location in references)
                     {
-                        HandleLocation(symbol, location);
+                        await HandleLocationAsync(symbolAndProjectId, location).ConfigureAwait(false);
                     }
                 }
                 finally
                 {
-                    wrapper.Increment();
+                    await wrapper.IncrementAsync().ConfigureAwait(false);
                 }
             }
         }

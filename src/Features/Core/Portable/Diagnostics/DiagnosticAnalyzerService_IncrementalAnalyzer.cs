@@ -5,6 +5,7 @@ using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.CodeAnalysis.CodeStyle;
 using Microsoft.CodeAnalysis.Internal.Log;
 using Microsoft.CodeAnalysis.Options;
 using Microsoft.CodeAnalysis.Shared.Options;
@@ -47,8 +48,7 @@ namespace Microsoft.CodeAnalysis.Diagnostics
         public void ShutdownAnalyzerFrom(Workspace workspace)
         {
             // this should be only called once analyzer associated with the workspace is done.
-            BaseDiagnosticIncrementalAnalyzer analyzer;
-            if (_map.TryGetValue(workspace, out analyzer))
+            if (_map.TryGetValue(workspace, out var analyzer))
             {
                 analyzer.Shutdown();
             }
@@ -127,8 +127,8 @@ namespace Microsoft.CodeAnalysis.Diagnostics
 
             public override bool NeedsReanalysisOnOptionChanged(object sender, OptionChangedEventArgs e)
             {
-                return e.Option.Feature == SimplificationOptions.PerLanguageFeatureName ||
-                       e.Option.Feature == SimplificationOptions.NonPerLanguageFeatureName ||
+                return e.Option.Feature == nameof(SimplificationOptions) ||
+                       e.Option.Feature == nameof(CodeStyleOptions) ||
                        e.Option == ServiceFeatureOnOffOptions.ClosedFileDiagnostic ||
                        e.Option == RuntimeOptions.FullSolutionAnalysis ||
                        e.Option == InternalDiagnosticsOptions.UseDiagnosticEngineV2 ||
